@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Agni Search — Local Static Search</title>
+<style>
+  :root{--accent:#ff7043;--bg:#0f1720;--card:#0b1220}
+  body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;margin:0;background:linear-gradient(180deg,#071029,#0b1220);color:#e6eef6;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:36px}
+  .wrap{width:100%;max-width:900px}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+  h1{margin:0;font-size:20px}
+  .searchbox{display:flex;gap:8px}
+  input[type="search"]{flex:1;padding:14px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.06);background:#071125;color:inherit;font-size:16px;outline:none}
+  button{background:var(--accent);border:none;padding:12px 16px;border-radius:10px;cursor:pointer;color:#111;font-weight:600}
+  .meta{margin-top:8px;color:#a9b7c7;font-size:13px}
+  .results{margin-top:20px;display:flex;flex-direction:column;gap:10px}
+  .card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.03);padding:12px 14px;border-radius:10px}
+  .title{font-weight:700;color:#fff;margin-bottom:6px}
+  .url{font-size:13px;color:#9fc5ff;margin-bottom:6px}
+  .desc{color:#d7e7f7}
+  mark{background:linear-gradient(90deg,#ffd7b3,#ffd0a0);color:#111;padding:0 3px;border-radius:3px}
+  .noresults{color:#ffb4b4}
+  footer{margin-top:18px;color:#9fb0c6;font-size:13px}
+  @media (max-width:520px){input[type="search"]{font-size:15px;padding:12px}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Agni Search 🔥</h1>
+      <div style="flex:1"></div>
+    </header>
+
+    <div class="searchbox">
+      <input id="q" type="search" placeholder="Type to search (title, description, content) — try 'ai' or 'apple'..." aria-label="Search">
+      <button id="clear">Clear</button>
+    </div>
+    <div class="meta" id="meta">Local static search — instant, private, runs in your browser</div>
+
+    <div class="results" id="results" aria-live="polite"></div>
+    <footer>Tip: drop a <code>data.json</code> (array of items) alongside this page to extend the index. See comments in HTML.</footer>
+  </div>
+
+<script>
+/*
+  Agni Search — static client-side search.
+  Data format (example items array):
+  [
+    { "id":"1", "title":"Apple", "url":"apple.html", "description":"A red fruit", "content":"Longer text to search..." },
+    ...
+  ]
+
+  You can either edit the `items` array below or create a data.json file in the same folder containing the array.
+*/
+
+const resultsEl = document.getElementById('results');
+const qEl = document.getElementById('q');
+const clearBtn = document.getElementById('clear');
+const metaEl = document.getElementById('meta');
+
+// === default dataset (edit or keep small for quick start) ===
+let items = [
+  { id: "1", title: "Apple — Fruit info", url: "https://example.com/apple", description: "A sweet red fruit rich in vitamins.", content: "Apple trees grow in temperate climates. Apples are used in pies and juices." },
+  { id: "2", title: "Banana — Benefits", url: "https://example.com/banana", description: "Yellow fruit high in potassium.", content: "Bananas are a great source of energy and commonly eaten raw." },
+  { id: "3", title: "Car — How it works", url: "https://example.com/car", description: "Vehicle for transport", content: "Cars use engines to move people and goods. There are petrol, diesel, and electric cars." },
+  { id: "4", title: "Chatbots and AI", url: "https://example.com/chatbots", description: "Intro to chatbots", content: "Chatbots use natural language processing to converse with users. Agni is an example of a simple chatbot UI." },
+  { id: "5", title: "Gardening Tips", url: "https://example.com/garden", description: "How to care for plants", content: "Water plants in the morning, use good soil, and give adequate sunlight." }
+];
+
+// Try to load external data.json if present (silent failure allowed)
+(async function loadExternal(){
+  try {
+    const r = await fetch('data.json', {cache: "no-store"});
+    if (r.ok){
+      const j = await r.json();
+      if (Array.isArray(j)) {
+        // merge — external items first
+        items = j.concat(items);
+        metaEl.textContent = `Index loaded (${items.length} items) — includes external data.json`;
+      }
+    }
+  } catch (e) {
+    // not found or CORS — ignore silently
+    //console.log('data.json not loaded', e);
+  }
+})();
+
+// ----------------- utility functions -----------------
+function tokenize(text){
+  return (text || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function scoreItem(item, terms){
+  // simple weighted scoring:
+  // title matches: +10 per term
+  // description matches: +5 per term
+  // content matches: +1 per term
+  const title = (item.title || '').toLowerCase();
+  const desc = (item.description || '').toLowerCase();
+  const content = (item.content || '').toLowerCase();
+  let score = 0;
+  for (const t of terms){
+    if (!t) continue;
+    if (title.includes(t)) score += 10;
+    if (desc.includes(t)) score += 5;
+    if (content.includes(t)) score += 1;
+    // bonus for whole-title startswith
+    if (title.startsWith(t)) score += 3;
+  }
+  return score;
+}
+
+function highlight(text, terms){
+  if (!text) return '';
+  let out = text;
+  // escape for regex
+  for (const raw of terms){
+    if (!raw) continue;
+    // escape regex special
+    const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('\\b(' + escaped + ')', 'ig');
+    out = out.replace(re, '<mark>$1</mark>');
+  }
+  return out;
+}
+
+function snippet(text, terms, len=180){
+  if(!text) return '';
+  const low = text.toLowerCase();
+  let idx = -1;
+  for(const t of terms){
+    if(!t) continue;
+    const i = low.indexOf(t);
+    if (i >= 0 && (idx === -1 || i < idx)) idx = i;
+  }
+  if (idx === -1) {
+    const s = text.slice(0, len);
+    return s + (text.length>len ? '…' : '');
+  }
+  const start = Math.max(0, idx - 50);
+  const s = text.slice(start, start + len);
+  return (start>0 ? '…' : '') + s + (start + len < text.length ? '…' : '');
+}
+
+// ----------------- main search -----------------
+let lastQuery = '';
+function doSearch(q){
+  const qtrim = (q || '').trim();
+  lastQuery = qtrim;
+  if (!qtrim) {
+    resultsEl.innerHTML = '';
+    metaEl.textContent = `Index loaded (${items.length} items). Type to search.`;
+    return;
+  }
+  const terms = tokenize(qtrim);
+  // score and filter
+  const scored = items.map(it => ({it, score: scoreItem(it, terms)}))
+                      .filter(x => x.score > 0)
+                      .sort((a,b) => b.score - a.score);
+
+  // if nothing matches by score, try fuzzy fallback: search title/desc/content includes any term
+  if (scored.length === 0) {
+    const fallback = items.map(it => {
+      const text = (it.title+' '+it.description+' '+(it.content||'')).toLowerCase();
+      const any = terms.some(t => text.includes(t));
+      return {it, score: any ? 1 : 0};
+    }).filter(x => x.score>0);
+    scored.push(...fallback);
+  }
+
+  // render
+  resultsEl.innerHTML = '';
+  if (scored.length === 0){
+    resultsEl.innerHTML = `<div class="card noresults">No results for "<strong>${escapeHtml(qtrim)}</strong>"</div>`;
+    metaEl.textContent = `0 results`;
+    return;
+  }
+  metaEl.textContent = `${scored.length} result(s) — showing top ${Math.min(scored.length, 50)}.`;
+  const show = scored.slice(0, 50); // limit
+  const termsForHighlight = terms.filter(Boolean);
+  for (const s of show){
+    const it = s.it;
+    const card = document.createElement('div');
+    card.className = 'card';
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.innerHTML = `<a href="${escapeHtml(it.url || '#')}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${highlight(escapeHtml(it.title || '(no title)'), termsForHighlight)}</a>`;
+    const url = document.createElement('div');
+    url.className = 'url';
+    url.textContent = it.url || '';
+    const desc = document.createElement('div');
+    desc.className = 'desc';
+    const snip = snippet(it.description || it.content || '', termsForHighlight, 180);
+    desc.innerHTML = highlight(escapeHtml(snip), termsForHighlight);
+    card.appendChild(title);
+    card.appendChild(url);
+    card.appendChild(desc);
+    resultsEl.appendChild(card);
+  }
+}
+
+// small HTML escape
+function escapeHtml(s){ return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// debounce
+let timer = null;
+qEl.addEventListener('input', ()=> {
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(()=> doSearch(qEl.value), 200);
+});
+
+// Enter key runs search immediately
+qEl.addEventListener('keydown', (e)=> {
+  if (e.key === 'Enter') { e.preventDefault(); doSearch(qEl.value); }
+});
+
+clearBtn.addEventListener('click', ()=> { qEl.value=''; doSearch(''); qEl.focus(); });
+
+// initial state
+metaEl.textContent = `Index ready (${items.length} items). Type to search.`;
+</script>
+</body>
+</html>
